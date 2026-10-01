@@ -21,8 +21,6 @@ mod isr;
 // mod services;
 mod usb;
 
-// const is_wireless: bool = false;
-
 // Map to the interrupt vectors in the startup script after removing `_IRQHandler`
 // Interrupts are called in the order they appear here
 bind_interrupts!(pub struct Irqs {
@@ -58,6 +56,11 @@ async fn main(spawner: Spawner) {
     let p = embassy_stm32::init(config);
     info!("Hello World!");
 
+    let is_wireless = {
+        // TODO: Read GPIO to decide whether to spin up BLE or USB stack
+        false
+    };
+
     let uart_config = usart::Config::default();
     // let mut uart = Uart::new_blocking(p.USART1, p.PA8, p.PB14, uart_config).unwrap();
     let mut usart = embassy_stm32::usart::Uart::new(
@@ -86,13 +89,6 @@ async fn main(spawner: Spawner) {
     };
     // let mut b3 = ExtiInput::new(p.PB4, p.EXTI4, Pull::Up, Irqs);
 
-    let mut usb_buffers = crate::usb::Buffers::new();
-    let mut usb = USB::new(&mut usb_buffers, p.USB_OTG_HS, p.PD6, p.PD7);
-
-    let mut tx: String<128> = String::new();
-    core::write!(&mut tx, "Hello DMA World!\n").unwrap();
-    usart.write(tx.as_bytes()).await.ok();
-
     spawner.spawn(unwrap!(watch_button(
         CHANNEL.sender(),
         b1,
@@ -104,32 +100,43 @@ async fn main(spawner: Spawner) {
         ScrollDirection::Down
     )));
 
-    // Do stuff with the class!
-    let hid_fut = async {
-        const SCROLL_AMOUNT: i8 = 1;
-        loop {
-            match CHANNEL.receive().await {
-                ScrollDirection::Up => {
-                    let report = CapstanReport::new(SCROLL_AMOUNT);
-                    match usb.writer.write_serialize(&report).await {
-                        Ok(()) => {}
-                        Err(e) => warn!("Failed to send report: {:?}", e),
+    if is_wireless {
+        defmt::todo!("Implement BLE mouse");
+    } else {
+        let mut usb_buffers = crate::usb::Buffers::new();
+        let mut usb = USB::new(&mut usb_buffers, p.USB_OTG_HS, p.PD6, p.PD7);
+
+        let mut tx: String<128> = String::new();
+        core::write!(&mut tx, "Hello DMA World!\n").unwrap();
+        usart.write(tx.as_bytes()).await.ok();
+
+        // Do stuff with the class!
+        let hid_fut = async {
+            const SCROLL_AMOUNT: i8 = 1;
+            loop {
+                match CHANNEL.receive().await {
+                    ScrollDirection::Up => {
+                        let report = CapstanReport::new(SCROLL_AMOUNT);
+                        match usb.writer.write_serialize(&report).await {
+                            Ok(()) => {}
+                            Err(e) => warn!("Failed to send report: {:?}", e),
+                        }
                     }
-                }
-                ScrollDirection::Down => {
-                    let report = CapstanReport::new(-SCROLL_AMOUNT);
-                    match usb.writer.write_serialize(&report).await {
-                        Ok(()) => {}
-                        Err(e) => warn!("Failed to send report: {:?}", e),
+                    ScrollDirection::Down => {
+                        let report = CapstanReport::new(-SCROLL_AMOUNT);
+                        match usb.writer.write_serialize(&report).await {
+                            Ok(()) => {}
+                            Err(e) => warn!("Failed to send report: {:?}", e),
+                        }
                     }
                 }
             }
-        }
-    };
+        };
 
-    // Run everything concurrently.
-    // If we had made everything `'static` above instead, we could do this using separate tasks instead.
-    join(usb.device.run(), hid_fut).await;
+        // Run everything concurrently.
+        // If we had made everything `'static` above instead, we could do this using separate tasks instead.
+        join(usb.device.run(), hid_fut).await;
+    }
 
     // Print with blocking UART
     // unwrap!(usart.blocking_write(b"Hello Embassy World!\n"));
