@@ -184,7 +184,7 @@ dependencies = [
  "panic-probe",
  "static_cell",
  "stm32-metapac 21.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "stm32wb-hci",
+ "stm32wb-hci 0.19.0",
  "usbd-hid",
 ]
 
@@ -396,7 +396,6 @@ version = "0.6.0"
 dependencies = [
  "defmt 1.1.1",
  "embassy-futures",
- "embassy-hal-internal",
  "embassy-sync 0.8.0",
  "embassy-time",
  "embedded-hal 0.2.7",
@@ -517,7 +516,7 @@ dependencies = [
  "sdio-host",
  "static_assertions",
  "stm32-fmc",
- "stm32-metapac 21.0.0 (git+https://github.com/embassy-rs/stm32-data-generated?tag=stm32-data-f8d4db59f2671310e856cbb00611eee6a92e4183)",
+ "stm32-metapac 21.0.0 (git+https://github.com/embassy-rs/stm32-data-generated?tag=stm32-data-caa36afd62510b0e6315ee0dccd1f9c65fbcac83)",
  "trait-set",
  "vcell",
  "xarxa-driver",
@@ -533,6 +532,7 @@ dependencies = [
  "cortex-m 0.7.9",
  "critical-section",
  "defmt 1.1.1",
+ "embassy-crypto",
  "embassy-embedded-hal",
  "embassy-futures",
  "embassy-hal-internal",
@@ -545,7 +545,7 @@ dependencies = [
  "heapless 0.9.3",
  "stm32-bindings",
  "stm32-device-signature",
- "stm32wb-hci",
+ "stm32wb-hci 0.19.1",
 ]
 
 [[package]]
@@ -1229,9 +1229,9 @@ dependencies = [
 
 [[package]]
 name = "stm32-bindings"
-version = "0.2.2"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6c4c27164677528031280fa1b039c7a0e546c206fa6e2140fa7d5860da0effb"
+checksum = "35bd0d87fdc1d067669ff9f65da60a6b309ca53b297d9f8b6f577a0f7c0437c7"
 dependencies = [
  "cortex-m 0.7.9",
 ]
@@ -1266,7 +1266,7 @@ dependencies = [
 [[package]]
 name = "stm32-metapac"
 version = "21.0.0"
-source = "git+https://github.com/embassy-rs/stm32-data-generated?tag=stm32-data-f8d4db59f2671310e856cbb00611eee6a92e4183#ac8849c0c0941fdf46901d26b8d68d723db307eb"
+source = "git+https://github.com/embassy-rs/stm32-data-generated?tag=stm32-data-caa36afd62510b0e6315ee0dccd1f9c65fbcac83#e463add8cc54375f61c6f5f83d6b589e7fc68be2"
 dependencies = [
  "cortex-m 0.7.9",
  "cortex-m-rt",
@@ -1278,6 +1278,20 @@ name = "stm32wb-hci"
 version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aed0b7404ec7f91541f246effbddb3d8b26a8d695105d376d2ddd4863b7ecff5"
+dependencies = [
+ "bitflags 2.13.1",
+ "bt-hci",
+ "bt-hci-transport",
+ "byteorder",
+ "critical-section",
+ "embedded-io 0.7.1",
+ "embedded-io-async 0.7.0",
+]
+
+[[package]]
+name = "stm32wb-hci"
+version = "0.19.1"
+source = "git+https://github.com/oueslatighaith/stm32wb-hci?branch=master#33bec3d2cf8ba11459d99e7f7ccbd17efe179e27"
 dependencies = [
  "bitflags 2.13.1",
  "bt-hci",
@@ -1565,7 +1579,7 @@ dependencies = [
 [[package]]
 name = "xarxa-driver"
 version = "0.1.0"
-source = "git+https://github.com/embassy-rs/xarxa?rev=14c369bbcbe8ee7167488ac9c9e18be059d83555#14c369bbcbe8ee7167488ac9c9e18be059d83555"
+source = "git+https://github.com/embassy-rs/xarxa?rev=af7342391a78692312cff94a826e9ea52dfea72f#af7342391a78692312cff94a826e9ea52dfea72f"
 dependencies = [
  "critical-section",
  "defmt 1.1.1",
