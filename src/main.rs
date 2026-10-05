@@ -1,32 +1,32 @@
 #![no_std]
 #![no_main]
 
+use crate::ble::BLE;
 use crate::descriptor::CapstanReport;
 use crate::usb::USB;
 use core::fmt::Write;
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
+use embassy_futures::select::{Either3, select3};
 use embassy_stm32;
 use embassy_stm32::{Config, bind_interrupts, interrupt, usart};
 use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
 use embassy_sync::channel::{Channel, Sender};
+use embassy_time::{Duration, Ticker};
 use heapless::String;
 
 use {defmt_rtt as _, panic_probe as _};
 
-// mod ble;
+mod ble;
 mod descriptor;
 mod isr;
-// mod services;
+mod services;
 mod usb;
 
 // Map to the interrupt vectors in the startup script after removing `_IRQHandler`
 // Interrupts are called in the order they appear here
 bind_interrupts!(pub struct Irqs {
-    RNG => embassy_stm32::rng::InterruptHandler<embassy_stm32::peripherals::RNG>;
-    AES => embassy_stm32::aes::InterruptHandler<embassy_stm32::peripherals::AES>;
-    PKA => embassy_stm32::pka::InterruptHandler<embassy_stm32::peripherals::PKA>;
     RADIO => embassy_stm32_wpan::HighInterruptHandler;
     HASH => embassy_stm32_wpan::LowInterruptHandler;
     USART1 => embassy_stm32::usart::InterruptHandler<embassy_stm32::peripherals::USART1>;
@@ -38,7 +38,7 @@ bind_interrupts!(pub struct Irqs {
     EXTI4 => crate::isr::CustomISR<interrupt::typelevel::EXTI4>; // B3
 });
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum ScrollDirection {
     Up,
     Down,
@@ -58,7 +58,7 @@ async fn main(spawner: Spawner) {
 
     let is_wireless = {
         // TODO: Read GPIO to decide whether to spin up BLE or USB stack
-        false
+        true
     };
 
     let uart_config = usart::Config::default();
@@ -101,7 +101,24 @@ async fn main(spawner: Spawner) {
     )));
 
     if is_wireless {
-        defmt::todo!("Implement BLE mouse");
+        let mut ble = BLE::new(&spawner).await;
+        ble.advertise().await;
+
+        let mut ticker = Ticker::every(Duration::from_secs(1));
+        loop {
+            match select3(ble.read_event(), ticker.next(), CHANNEL.receive()).await {
+                Either3::First(event) => ble.process_event(event).await,
+                Either3::Second(_) => ble.update_battery().await,
+                Either3::Third(direction) => {
+                    ble.scroll(if direction == ScrollDirection::Up {
+                        1
+                    } else {
+                        -1
+                    })
+                    .await
+                }
+            }
+        }
     } else {
         let mut usb_buffers = crate::usb::Buffers::new();
         let mut usb = USB::new(&mut usb_buffers, p.USB_OTG_HS, p.PD6, p.PD7);

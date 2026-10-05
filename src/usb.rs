@@ -140,10 +140,9 @@ impl embassy_usb::class::hid::RequestHandler for MyRequestHandler {
             ReportId::In(_) => None,
             ReportId::Out(_) => None,
             ReportId::Feature(0x02) => {
-                buf[0] = 0x02;
                 // This is the feature we defined in the HID descriptor as being the Resolution Multipliers
                 let report = CapstanReport::new(0);
-                let report_length = match report.serialise_features(&mut buf[1..]) {
+                let report_length = match report.serialise_features(buf) {
                     Ok(v) => v as usize,
                     Err(_) => {
                         warn!("Report buffer overflowed when trying to serialise features");
