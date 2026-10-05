@@ -3,6 +3,10 @@ use usbd_hid::descriptor::{
     AsInputReport, BufferOverflow, SerializedDescriptor, gen_hid_descriptor,
 };
 
+// Update these manually if they need changing
+pub const INPUT_REPORT_SIZE: usize = 6;
+pub const FEATURE_REPORT_SIZE: usize = 3;
+
 // Refer to usbd_hid::descriptor::MouseReport as a starting point
 
 /// CapstanReport describes a report and its companion descriptor than can be used
@@ -76,18 +80,19 @@ impl CapstanReport {
         &self,
         buf: &mut [u8],
     ) -> Result<usize, usbd_hid::descriptor::BufferOverflow> {
-        if buf.len() < 2 {
+        if buf.len() < FEATURE_REPORT_SIZE {
             return Err(BufferOverflow);
         }
-        buf[0] = self.y_res;
-        buf[1] = self.x_res;
-        Ok(2)
+        buf[0] = 0x02;
+        buf[1] = self.y_res;
+        buf[2] = self.x_res;
+        Ok(FEATURE_REPORT_SIZE)
     }
 }
 
 impl AsInputReport for CapstanReport {
     fn serialize(&self, buf: &mut [u8]) -> Result<usize, usbd_hid::descriptor::BufferOverflow> {
-        if buf.len() < 6 {
+        if buf.len() < INPUT_REPORT_SIZE {
             warn!("Trying to serialise into a buffer of {} bytes", buf.len());
             return Err(BufferOverflow);
         }
@@ -97,6 +102,6 @@ impl AsInputReport for CapstanReport {
         buf[3] = self.y as u8;
         buf[4] = self.wheel as u8;
         buf[5] = self.pan as u8;
-        Ok(6)
+        Ok(INPUT_REPORT_SIZE)
     }
 }
