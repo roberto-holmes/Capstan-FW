@@ -3,7 +3,10 @@ use core::sync::atomic::{AtomicU8, Ordering};
 use defmt::*;
 use embassy_stm32::peripherals::USB_OTG_HS;
 use embassy_usb::{
-    class::hid::{HidBootProtocol, HidProtocolMode, HidSubclass, HidWriter, ReportId, State},
+    class::hid::{
+        HidBootProtocol, HidProtocolMode, HidSubclass, ReportId,
+        device::{HidWriter, RequestHandler, State},
+    },
     control::OutResponse,
 };
 use usbd_hid::descriptor::SerializedDescriptor;
@@ -19,7 +22,7 @@ pub struct Buffers<'a> {
     bos_descriptor: [u8; 256],
     control_buf: [u8; 64],
     request_handler: MyRequestHandler,
-    state: embassy_usb::class::hid::State<'a>,
+    state: State<'a>,
 }
 impl Buffers<'_> {
     pub fn new() -> Self {
@@ -45,7 +48,7 @@ impl Buffers<'_> {
 
 pub struct USB<'a> {
     pub device: embassy_usb::UsbDevice<'a, embassy_stm32::usb::Driver<'a, USB_OTG_HS>>,
-    pub writer: embassy_usb::class::hid::HidWriter<
+    pub writer: HidWriter<
         'a,
         embassy_stm32::usb::Driver<'a, USB_OTG_HS>,
         { size_of::<CapstanReport>() + 1 },
@@ -101,7 +104,7 @@ impl<'a> USB<'a> {
         );
 
         // Create classes on the builder.
-        let config = embassy_usb::class::hid::Config {
+        let config = embassy_usb::class::hid::device::Config {
             report_descriptor: CapstanReport::desc(),
             request_handler: Some(&mut buffers.request_handler),
             poll_ms: 60,
@@ -131,7 +134,7 @@ impl<'a> USB<'a> {
 
 struct MyRequestHandler {}
 
-impl embassy_usb::class::hid::RequestHandler for MyRequestHandler {
+impl RequestHandler for MyRequestHandler {
     // Section 7.2.1 of USB HID 1.11
     fn get_report(&mut self, id: ReportId, buf: &mut [u8]) -> Option<usize> {
         info!("Get report for {:?}", id);

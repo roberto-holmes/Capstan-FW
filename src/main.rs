@@ -100,13 +100,29 @@ async fn main(spawner: Spawner) {
         ScrollDirection::Down
     )));
 
+    // Print with blocking UART
+    // unwrap!(usart.blocking_write(b"Hello Embassy World!\n"));
+
+    // Print with DMA
+    let mut tx: String<128> = String::new();
+    core::write!(&mut tx, "Hello DMA World!\n").unwrap();
+    usart.write(tx.as_bytes()).await.ok();
+    core::write!(&mut tx, "Tick\n").unwrap();
+
     if is_wireless {
         let mut ble = BLE::new(&spawner).await;
         ble.advertise().await;
 
         let mut ticker = Ticker::every(Duration::from_secs(1));
+        let mut event_buf = embassy_stm32_wpan::bluetooth::EventBuffer::new();
         loop {
-            match select3(ble.read_event(), ticker.next(), CHANNEL.receive()).await {
+            match select3(
+                ble.read_event(&mut event_buf),
+                ticker.next(),
+                CHANNEL.receive(),
+            )
+            .await
+            {
                 Either3::First(event) => ble.process_event(event).await,
                 Either3::Second(_) => ble.update_battery().await,
                 Either3::Third(direction) => {
@@ -154,14 +170,6 @@ async fn main(spawner: Spawner) {
         // If we had made everything `'static` above instead, we could do this using separate tasks instead.
         join(usb.device.run(), hid_fut).await;
     }
-
-    // Print with blocking UART
-    // unwrap!(usart.blocking_write(b"Hello Embassy World!\n"));
-
-    // // Print with DMA
-    // let mut tx: String<128> = String::new();
-    // core::write!(&mut tx, "Hello DMA World!\n").unwrap();
-    // usart.write(tx.as_bytes()).await.ok();
 
     // loop {
     //     info!("led on!");

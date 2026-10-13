@@ -1,22 +1,26 @@
 use crate::services::{BasService, DisService, HidService};
 use crate::{Irqs, services};
+use bt_hci::event::EncryptionChangeV1;
+use bt_hci::param::EncryptionEnabledLevel;
 use defmt::*;
 use defmt_rtt as _;
 use embassy_executor::Spawner;
-use embassy_stm32_wpan::bluetooth::HCI;
 use embassy_stm32_wpan::bluetooth::gap::{AdvData, AdvParams, AdvType, GapEvent, OwnAddressType};
 use embassy_stm32_wpan::bluetooth::gap_init::GapInitParams;
-use embassy_stm32_wpan::bluetooth::gatt::{GattServer, is_cccd_handle, is_value_handle};
+use embassy_stm32_wpan::bluetooth::gatt::{CccdValue, GattServer, is_cccd_handle, is_value_handle};
 use embassy_stm32_wpan::bluetooth::security::{
-    IoCapability, SecureConnectionsSupport, SecurityEvent, SecurityManager, SecurityParams,
+    IdentityAddressType, IoCapability, SecureConnectionsSupport, SecurityEvent, SecurityManager,
+    SecurityParams,
 };
-use embassy_stm32_wpan::{Platform, new_platform};
+use embassy_stm32_wpan::bluetooth::{EventBuffer, HCI};
+use embassy_stm32_wpan::{Platform, erase_bond_nvm_flash, new_platform, set_nvm_base_address};
 use panic_probe as _;
-use stm32wb_hci::Event;
-use stm32wb_hci::event::{Encryption, EncryptionChange};
-use stm32wb_hci::vendor::event::{
-    AttExchangeMtuResponse, GapPairingComplete, GapPairingStatus, VendorEvent,
-};
+use stm32wb_hci::aci::AciEvent;
+use stm32wb_hci::aci::att::AttExchangeMtuRespEvent;
+use stm32wb_hci::aci::gap::GapPairingCompleteEvent;
+use stm32wb_hci::aci::values::PairingStatus;
+use stm32wb_hci::event::BleEvent;
+use stm32wb_hci::wire::OrUnknown;
 
 const ADVERTISING_NAME: &'static str = "HID_ADV";
 const DEVICE_NAME: &'static [u8] = b"Capstan";
@@ -31,6 +35,9 @@ const GAP_APPEARANCE_HID_MOUSE: u16 = 0x03c2;
 // HID Control Point Characteristic - Bluetooth HIDS v1.0 2.11
 const HID_CONTROL_POINT_SUSPEND: u8 = 0x00;
 const HID_CONTROL_POINT_EXIT_SUSPEND: u8 = 0x01;
+
+/// Erase bond NVM **before** BLE init. Set `true` once to clear stale bonds, flash, then `false`.
+const ERASE_BONDS_ON_BOOT: bool = false;
 
 // HID Over GATT Profile
 // https://www.bluetooth.com/specifications/specs/html/?src=hogp_v1-2_1777405843/HOGP_v1.2/out/en/index-en.html
@@ -88,6 +95,20 @@ pub struct BLE<'a> {
 
 impl<'a> BLE<'a> {
     pub async fn new(spawner: &Spawner) -> Self {
+        // Configure the last 8KB page of BANK_2 for bond storage.
+        // Must be called before new_platform! triggers BleStack_Init.
+        set_nvm_base_address(0x081F_E000);
+        // Following ble_bonding example
+        // TODO: How do we signal that we want to erase the flash?
+        // This needs to run after set_nvm_base_address but before new_platform
+        if ERASE_BONDS_ON_BOOT {
+            if erase_bond_nvm_flash() {
+                info!("Bond NVM flash page erased — next boot should not restore bonds");
+            } else {
+                warn!("Bond NVM flash erase failed");
+            }
+        }
+
         let (platform, runtime) = new_platform!(8);
 
         spawner.spawn(ble_runner_task(platform).expect("Failed to spawn BLE runner"));
@@ -115,7 +136,8 @@ impl<'a> BLE<'a> {
             .with_mitm_protection(true)
             .with_secure_connections(SecureConnectionsSupport::Optional)
             .with_key_size_range(8, 16)
-            .with_io_capability(IoCapability::DisplayYesNo);
+            .with_io_capability(IoCapability::DisplayYesNo)
+            .with_identity_address_type(IdentityAddressType::Public);
 
         security
             .set_authentication_requirements(security_params)
@@ -123,9 +145,41 @@ impl<'a> BLE<'a> {
         info!("Security configured: Bonding + MITM + SC");
 
         // Enable address resolution (for bonded devices using RPA)
+        // TODO: Necessary?
         security
             .set_address_resolution_enable(true)
             .expect("Failed to enable address resolution");
+
+        // ST: initialize whitelist when bonding is enabled.
+        security
+            .configure_filter_accept_list()
+            .expect("configure_filter_accept_list");
+
+        if ERASE_BONDS_ON_BOOT {
+            security
+                .clear_security_database()
+                .expect("clear_security_database");
+            info!("Bond RAM database cleared (ERASE_BONDS_ON_BOOT)");
+        }
+
+        // Cold boot with bonds in NVM: program FAL + resolving list (ST privacy flow).
+        match security.configure_filter_and_resolving_list() {
+            Ok(count) => {
+                if count > 0 {
+                    info!("Bond lists configured at boot ({} peer(s))", count);
+                }
+            }
+            Err(e) => warn!(
+                "configure_filter_and_resolving_list at boot failed: {:?}",
+                e
+            ),
+        }
+
+        // Dump the controller's view of the resolving list (debug). Useful for verifying that
+        // the bond's IRK made it into the LL resolving list — if `peer_rpa` here matches the
+        // identity address (instead of being a valid RPA), the LL has `peer_irk = 0` and will
+        // silently drop incoming CONNECT_INDs from a bonded RPA-using peer like iOS.
+        security.log_resolving_list_diagnostics(None);
 
         embassy_futures::yield_now().await;
 
@@ -175,11 +229,15 @@ impl<'a> BLE<'a> {
         info!("Advertising as '{}'", ADVERTISING_NAME);
     }
 
-    pub async fn read_event(&mut self) -> Event {
-        self.ble.read_event().await
+    pub fn erase_bond() {
+        // TODO: How do we do this?
     }
 
-    pub async fn process_event(&mut self, event: stm32wb_hci::Event) {
+    pub async fn read_event<'b>(&mut self, event_buffer: &'b mut EventBuffer) -> BleEvent<'b> {
+        self.ble.read_event(event_buffer).await
+    }
+
+    pub async fn process_event(&mut self, event: BleEvent<'_>) {
         // ── GAP events ────────────────────────────────────────────────
         if let Some(gap_event) = self.ble.process_event(&event) {
             self.process_event_gap(gap_event).await;
@@ -277,9 +335,9 @@ impl<'a> BLE<'a> {
                 info!("=== AUTHORIZATION REQUEST ===");
                 info!("  Connection: 0x{:04X}", conn_handle);
             }
-            SecurityEvent::PeripheralSecurityInitiated => {
-                info!("=== PERIPHERAL SECURITY INITIATED ===");
-            }
+            // SecurityEvent::PeripheralSecurityInitiated => {
+            //     info!("=== PERIPHERAL SECURITY INITIATED ===");
+            // }
             SecurityEvent::AddressNotResolved { conn_handle } => {
                 warn!("=== ADDRESS NOT RESOLVED ===");
                 warn!("  Connection: 0x{:04X}", conn_handle);
@@ -295,13 +353,13 @@ impl<'a> BLE<'a> {
         }
     }
 
-    async fn process_event_gatt(&mut self, event: stm32wb_hci::Event) {
+    async fn process_event_gatt(&mut self, event: BleEvent<'_>) {
         match event {
             // ── Numeric comparison (LE SC path — the normal iOS path) ───────
             // Both sides computed the same 6-digit value from the ECDH
             // exchange. We auto-confirm; iOS shows a popup asking the user
             // to confirm the same value shown here.
-            Event::Vendor(VendorEvent::GapNumericComparisonValue(ev)) => {
+            BleEvent::Vendor(AciEvent::GapNumericComparisonValue(ev)) => {
                 info!("");
                 info!("╔══════════════════════════════════╗");
                 info!("║  CONFIRM ON PHONE: {:06}        ║", ev.numeric_value);
@@ -316,30 +374,31 @@ impl<'a> BLE<'a> {
             }
 
             // ── Pairing result ──────────────────────────────────────────────
-            Event::Vendor(VendorEvent::GapPairingComplete(GapPairingComplete {
-                conn_handle,
+            BleEvent::Vendor(AciEvent::GapPairingComplete(GapPairingCompleteEvent {
+                connection_handle: conn_handle,
                 status,
+                reason,
             })) => match status {
-                GapPairingStatus::Success => {
+                OrUnknown::Known(PairingStatus::Success) => {
                     info!(
                         "PAIRING COMPLETE: handle=0x{:04X} — encrypted and bonded",
                         conn_handle.0
                     );
                     self.security.log_bonded_devices();
                 }
-                GapPairingStatus::Timeout(reason) => {
+                OrUnknown::Known(PairingStatus::SmpTimeout) => {
                     warn!(
                         "Pairing timed out: handle=0x{:04X} reason={:?}",
                         conn_handle.0, reason
                     );
                 }
-                GapPairingStatus::Failed(reason) => {
+                OrUnknown::Known(PairingStatus::PairingFailed) | OrUnknown::Unknown(_) => {
                     warn!(
                         "Pairing failed: handle=0x{:04X} reason={:?} — wrong code entered?",
                         conn_handle.0, reason
                     );
                 }
-                GapPairingStatus::EncryptionFailed(reason) => {
+                OrUnknown::Known(PairingStatus::EncryptionFailed) => {
                     warn!(
                         "Encryption failed: handle=0x{:04X} reason={:?}",
                         conn_handle.0, reason
@@ -348,83 +407,90 @@ impl<'a> BLE<'a> {
             },
 
             // ── Encryption state (also fires on reconnect with stored bond) ─
-            Event::EncryptionChange(EncryptionChange {
-                conn_handle,
-                encryption,
+            BleEvent::Core(bt_hci::event::Event::EncryptionChangeV1(EncryptionChangeV1 {
+                handle,
+                enabled,
                 ..
-            }) => match encryption {
-                Encryption::On | Encryption::OnAesCcmForBrEdr => {
-                    info!("Link encrypted: handle=0x{:04X}", conn_handle.0);
+            })) => match enabled {
+                EncryptionEnabledLevel::OnE0OrAesCcm | EncryptionEnabledLevel::OnAesCcm => {
+                    info!("Link encrypted: handle=0x{:04X}", handle.raw());
                 }
-                Encryption::Off => {
-                    warn!("Encryption disabled: handle=0x{:04X}", conn_handle.0);
+                EncryptionEnabledLevel::Off => {
+                    warn!("Encryption disabled: handle=0x{:04X}", handle.raw());
                 }
             },
 
             // ── Bond lost / LTK mismatch: allow re-pair and restart open advertising ─
-            // Event::Vendor(VendorEvent::GapBondLost(_)) => {
-            //     info!("Bond lost — allowing rebond and restarting advertising");
-            //     let conn_handle = ble
-            //         .connections()
-            //         .iter()
-            //         .next()
-            //         .map(|c| c.handle.0)
-            //         .unwrap_or(0);
-            //     let _ = security.allow_rebond(conn_handle);
-            //     if self.ble.is_advertising() {
-            //         let _ = self.ble.stop_advertising().await;
-            //     }
-            //     let mut scan_rsp = AdvData::new();
-            //     scan_rsp.add_name("Embassy-Bond").expect("scan rsp name");
-            //     let _ = ble
-            //         .start_advertising(make_adv_params(), make_adv_data(), Some(scan_rsp))
-            //         .await;
-            // }
+            BleEvent::Vendor(AciEvent::GapBondLost(_)) => {
+                info!("Bond lost — allowing rebond and restarting advertising");
+                let conn_handle = self
+                    .ble
+                    .connections()
+                    .iter()
+                    .next()
+                    .map(|c| c.handle.raw())
+                    .unwrap_or(0);
+                let _ = self.security.allow_rebond(conn_handle);
+                if self.ble.is_advertising() {
+                    let _ = self.ble.stop_advertising().await;
+                }
+                self.advertise().await;
+            }
 
             // ── Authenticated write received from bonded peer ─────────────
-            Event::Vendor(VendorEvent::GattAttributeModified(attr)) => {
+            BleEvent::Vendor(AciEvent::GattAttributeModified(attr)) => {
                 info!(
                     "Authenticated write: conn=0x{:04X} attr=0x{:04X} data={:?}",
-                    attr.conn_handle,
-                    attr.attr_handle,
-                    attr.data()
+                    attr.connection_handle, attr.attr_handle, attr.attr_data
                 );
                 // CCCD write → enable/disable notifications
-                if is_cccd_handle(self.state.hid.report_handle(), attr.attr_handle.0) {
-                    let enabled = attr.data().first().copied().unwrap_or(0) & 0x01 != 0;
+                if is_cccd_handle(self.state.hid.report_handle(), attr.attr_handle) {
+                    let cccd = CccdValue::from_bytes(attr.attr_data);
                     // TODO: Separate notifications
-                    self.state.hid.notifications_enabled = enabled;
+                    self.state.hid.notifications_enabled = cccd.notifications;
                     info!(
                         "HID notifications {}",
-                        if enabled { "ENABLED" } else { "DISABLED" }
+                        if cccd.notifications {
+                            "ENABLED"
+                        } else {
+                            "DISABLED"
+                        }
                     );
-                } else if is_cccd_handle(self.state.bas.batt_level_handle(), attr.attr_handle.0) {
-                    let enabled = attr.data().first().copied().unwrap_or(0) & 0x01 != 0;
-                    self.state.bas.notifications_enabled = true;
+                } else if is_cccd_handle(self.state.bas.batt_level_handle(), attr.attr_handle) {
+                    let cccd = CccdValue::from_bytes(attr.attr_data);
+                    self.state.bas.notifications_enabled = cccd.notifications;
                     info!(
                         "BAS notifications {}",
-                        if enabled { "ENABLED" } else { "DISABLED" }
+                        if cccd.notifications {
+                            "ENABLED"
+                        } else {
+                            "DISABLED"
+                        }
                     );
-                } else if is_value_handle(self.state.hid.control_point_handle(), attr.attr_handle.0)
-                {
-                    if attr.data().first().copied() == Some(HID_CONTROL_POINT_SUSPEND) {
+                } else if is_value_handle(self.state.hid.control_point_handle(), attr.attr_handle) {
+                    if attr.attr_data.first().copied() == Some(HID_CONTROL_POINT_SUSPEND) {
                         info!("Suspend device");
-                    } else if attr.data().first().copied() == Some(HID_CONTROL_POINT_EXIT_SUSPEND) {
+                    } else if attr.attr_data.first().copied()
+                        == Some(HID_CONTROL_POINT_EXIT_SUSPEND)
+                    {
                         info!("Wake device");
                     } else {
-                        info!("Unknown HID Control Point command: {:?}", attr.data());
+                        info!("Unknown HID Control Point command: {:?}", attr.attr_data);
                     }
                 }
             }
-            Event::Vendor(VendorEvent::AttExchangeMtuResponse(AttExchangeMtuResponse {
-                conn_handle,
+            BleEvent::Vendor(AciEvent::AttExchangeMtuResp(AttExchangeMtuRespEvent {
+                connection_handle,
                 server_rx_mtu,
             })) => {
-                if let Some(conn) = self.ble.get_connection_mut(conn_handle) {
-                    conn.update_mtu(server_rx_mtu as u16);
+                if let Some(conn) = self.ble.get_connection_mut(connection_handle) {
+                    conn.update_mtu(server_rx_mtu);
                 }
             }
-            Event::LeDataLengthChangeEvent(_) => info!("Data Length Change event"),
+            // BleEvent::LeDataLengthChangeEvent(_) => info!("Data Length Change event"),
+            // BleEvent::LeEnhancedConnectionComplete(_) => {
+            //     info!("Enhanced Connection Complete event")
+            // }
             gatt_event => {
                 warn!("Unknown GATT event {:?}", gatt_event);
             }
